@@ -205,6 +205,9 @@ pub fn install(
     let unpacked = staging.0.join("unpacked");
     std::fs::create_dir(&unpacked).map_err(|e| e.to_string())?;
     let files = extract(file, &unpacked)?;
+    // A release ZIP usually wraps everything in one folder (`VectorCraft-1.2.3/vectorcraft.exe`).
+    // Install what is inside it, so such a ZIP lands the same way as one packed without it.
+    let (unpacked, files) = crate::portable_layout::unwrap_single_folder(unpacked, files);
     let executable = files
         .iter()
         .find(|relative| {
