@@ -3,9 +3,24 @@
 
 use std::path::{Path, PathBuf};
 
+/// Whether two paths name the same file to Windows: case is ignored, a trailing separator does
+/// not count, and the `\\?\` prefix is not part of the name.
+pub fn same_windows_path(left: &Path, right: &Path) -> bool {
+    fn normalized(path: &Path) -> String {
+        let text = path.to_string_lossy();
+        let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
+        text.trim_end_matches(['\\', '/']).to_lowercase()
+    }
+    normalized(left) == normalized(right)
+}
+
 /// The one folder a ZIP wraps everything in, when it has one: every entry lies inside it, and no
 /// entry sits beside it at the root. `None` for a ZIP whose files are already at the root, or one
 /// with several top-level entries, where there is nothing unambiguous to strip.
+///
+/// Entries are compared as Windows names them, so `App/app.exe` and `app/lib.dll` are one folder:
+/// that is the folder they extract into on a case-insensitive volume, and `extract` already
+/// refuses a ZIP whose names collide only in case.
 fn wrapper_folder(files: &[PathBuf]) -> Option<PathBuf> {
     let mut folders = files.iter().map(|relative| {
         let mut components = relative.components();
@@ -17,7 +32,7 @@ fn wrapper_folder(files: &[PathBuf]) -> Option<PathBuf> {
         }
     });
     let first = folders.next().flatten()?;
-    folders.all(|folder| folder.as_deref() == Some(first.as_path())).then_some(first)
+    folders.all(|folder| folder.as_deref().is_some_and(|f| same_windows_path(f, &first))).then_some(first)
 }
 
 /// `unpacked` and the entries inside it, with one wrapping folder dropped when the ZIP has one:
@@ -25,7 +40,9 @@ fn wrapper_folder(files: &[PathBuf]) -> Option<PathBuf> {
 /// that wraps its program installs exactly as one packed without the wrapper does.
 pub fn unwrap_single_folder(unpacked: PathBuf, files: Vec<PathBuf>) -> (PathBuf, Vec<PathBuf>) {
     let Some(folder) = wrapper_folder(&files) else { return (unpacked, files) };
-    let inside = files.iter().filter_map(|entry| entry.strip_prefix(&folder).ok().map(Path::to_path_buf)).collect();
+    // The first component goes by position, not by name: `strip_prefix` compares exactly, and the
+    // entries may spell the folder in another case than the one chosen above.
+    let inside = files.iter().map(|entry| entry.components().skip(1).collect()).collect();
     (unpacked.join(folder), inside)
 }
 
@@ -60,6 +77,32 @@ mod tests {
         assert_eq!(wrapper_folder(&deep), Some(p("App")));
         let stripped: Vec<PathBuf> = deep.iter().map(|f| f.strip_prefix("App").unwrap().to_path_buf()).collect();
         assert_eq!(wrapper_folder(&stripped), Some(p("bin")), "the next level is only stripped if asked for again");
+    }
+
+    /// Windows treats `App` and `app` as one folder, and a ZIP spelling the wrapper both ways
+    /// extracts into one folder there, so it is one wrapper here too. `extract` already refuses a
+    /// ZIP whose names collide only in case, so this cannot hide two real folders.
+    #[test]
+    fn a_wrapper_spelled_in_different_cases_is_one_folder() {
+        let p = |s: &str| PathBuf::from(s);
+        let mixed = [p("App-1.2.3/photocraft.exe"), p("app-1.2.3/lib.dll"), p("APP-1.2.3/data/x.bin")];
+        assert_eq!(wrapper_folder(&mixed), Some(p("App-1.2.3")), "the first spelling names it");
+
+        // And the entries lose it however they spell it, so the executable reaches the root.
+        let (from, files) = unwrap_single_folder(p("/staging/unpacked"), mixed.to_vec());
+        assert_eq!(from, p("/staging/unpacked/App-1.2.3"));
+        assert_eq!(files, vec![p("photocraft.exe"), p("lib.dll"), p("data/x.bin")]);
+
+        // Genuinely different folders are still different.
+        assert_eq!(wrapper_folder(&[p("App/a.exe"), p("Apple/b.dll")]), None);
+    }
+
+    #[test]
+    fn windows_names_the_same_file_whatever_the_case_or_trailing_slash() {
+        let p = |s: &str| PathBuf::from(s);
+        assert!(same_windows_path(&p("App/app.exe"), &p("app/APP.EXE")));
+        assert!(same_windows_path(&p("App"), &p("App/")));
+        assert!(!same_windows_path(&p("App"), &p("Apple")));
     }
 
     /// What the installer uses: where to read the files from, and what to call them.

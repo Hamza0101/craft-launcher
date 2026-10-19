@@ -72,15 +72,6 @@ fn resolve_missing(path: &Path) -> Result<PathBuf, String> {
     Err("The installation folder has no existing ancestor.".into())
 }
 
-fn same_windows_path(left: &Path, right: &Path) -> bool {
-    fn normalized(path: &Path) -> String {
-        let text = path.to_string_lossy();
-        let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
-        text.trim_end_matches(['\\', '/']).to_lowercase()
-    }
-    normalized(left) == normalized(right)
-}
-
 fn linked(meta: &std::fs::Metadata) -> bool {
     #[cfg(windows)]
     {
@@ -149,7 +140,7 @@ fn recorded_files<'a>(app: &CraftApp, record: &'a Record) -> Result<(&'a Path, V
         return Err("The launcher has no valid ownership record for this portable folder.".into());
     }
     let resolved = resolve_missing(root)?;
-    if !same_windows_path(root, &resolved) {
+    if !crate::portable_layout::same_windows_path(root, &resolved) {
         return Err("The recorded portable folder resolves through a changed alias. Reinstall it to choose a safe location.".into());
     }
     validate_owned_directory(root, root)?;
@@ -224,7 +215,7 @@ pub fn install(
         let target = destination.join(relative);
         validate_owned_directory(&destination, target.parent().ok_or("no destination folder")?)?;
         if let Ok(meta) = std::fs::symlink_metadata(&target) {
-            let recorded = old_files.iter().any(|old| same_windows_path(old, relative));
+            let recorded = old_files.iter().any(|old| crate::portable_layout::same_windows_path(old, relative));
             if linked(&meta) || !meta.is_file() || !(recorded || replace) {
                 return Err("The installation would overwrite an unrecorded file.".into());
             }
