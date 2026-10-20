@@ -18,18 +18,25 @@ pub fn legacy_path(app_id: &str) -> Option<PathBuf> {
 /// when there is nothing to move or `path` already exists, so a later run never overwrites newer
 /// settings with older ones. The old file is left where it is: an older launcher started again
 /// still finds it, and it is small.
+///
+/// Written through a temporary file in the destination folder, as every other write to this file
+/// is. A copy that created `path` and then failed would leave a half-written file that the next
+/// start takes for adopted settings, and the launcher would read its defaults from then on with
+/// the real settings still sitting in the old folder.
 pub fn adopt(path: &Path, legacy: Option<&Path>) -> bool {
     let Some(legacy) = legacy else { return false };
     if path.exists() || !legacy.is_file() || legacy == path {
         return false;
     }
-    let Some(parent) = path.parent() else { return false };
-    if let Err(e) = std::fs::create_dir_all(parent) {
-        log::warn!("{}: {e}", parent.display());
-        return false;
-    }
-    match std::fs::copy(legacy, path) {
-        Ok(_) => {
+    let bytes = match std::fs::read(legacy) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            log::warn!("{}: {e}", legacy.display());
+            return false;
+        }
+    };
+    match artcraft_launcher_native::paths::write_atomic(path, &bytes) {
+        Ok(()) => {
             log::info!("adopted the settings from {}", legacy.display());
             true
         }
@@ -175,6 +182,19 @@ mod tests {
         save(&new.file(), "settings", &now).unwrap();
         assert!(!adopt(&new.file(), Some(&old.file())));
         assert_eq!(load::<Settings>(&new.file(), "settings"), Some(now));
+
+        // A destination that cannot be written leaves nothing behind for the next start to take
+        // for adopted settings: here the folder's place is taken by a file. (This holds however
+        // the bytes are written -- the partial-copy case it guards against needs a write that
+        // fails after creating the file, which no portable test can provoke.)
+        let blocked = Scratch::new("settings-adopt-blocked");
+        std::fs::create_dir_all(&blocked.0).unwrap();
+        let wall = blocked.0.join("wall");
+        std::fs::write(&wall, b"not a folder").unwrap();
+        let under = wall.join("app.ron");
+        assert!(!adopt(&under, Some(&old.file())));
+        assert!(!under.exists(), "no half-written settings file");
+        assert_eq!(std::fs::read(&wall).unwrap(), b"not a folder", "and nothing else was replaced");
 
         // Nothing to take over, and the same file twice, are both no-ops rather than errors.
         let empty = Scratch::new("settings-adopt-empty");
